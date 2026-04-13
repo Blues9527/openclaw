@@ -138,6 +138,85 @@ def evaluate(quote: dict[str, Any], move_pct: float, volume_ratio: float) -> dic
     }
 
 
+def analyze_reseal(quote: dict[str, Any]) -> dict[str, Any]:
+    price = quote.get("price", 0.0)
+    pre_close = quote.get("pre_close", 0.0)
+    high = quote.get("high", 0.0)
+    low = quote.get("low", 0.0)
+    bid1_vol = quote.get("bid1_vol_lots", 0)
+    ask1_vol = quote.get("ask1_vol_lots", 0)
+    change_pct = quote.get("change_pct", 0.0)
+
+    limit_up = round(pre_close * 1.10, 2) if pre_close else 0.0
+    distance_to_limit = round(limit_up - price, 2) if limit_up else 0.0
+    pullback_from_high_pct = round(((high - price) / high * 100), 2) if high else 0.0
+    intraday_amplitude_pct = round(((high - low) / pre_close * 100), 2) if pre_close else 0.0
+    bid_ask_ratio = round((bid1_vol / ask1_vol), 2) if ask1_vol else 99.0
+
+    score = 0
+    reasons = []
+
+    if change_pct >= 8:
+        score += 2
+        reasons.append("涨幅仍在强势区")
+    elif change_pct >= 5:
+        score += 1
+        reasons.append("涨幅仍有强势基础")
+    else:
+        reasons.append("涨幅优势一般")
+
+    if distance_to_limit <= 0.03:
+        score += 2
+        reasons.append("已非常接近涨停价")
+    elif distance_to_limit <= 0.08:
+        score += 1
+        reasons.append("距离涨停价不远")
+    else:
+        reasons.append("离涨停价还有距离")
+
+    if pullback_from_high_pct <= 1.0:
+        score += 2
+        reasons.append("开板后回撤较浅")
+    elif pullback_from_high_pct <= 2.0:
+        score += 1
+        reasons.append("开板后回撤可控")
+    else:
+        reasons.append("开板后回撤偏深")
+
+    if bid_ask_ratio >= 1.5:
+        score += 2
+        reasons.append("买一承接明显强于卖一抛压")
+    elif bid_ask_ratio >= 0.8:
+        score += 1
+        reasons.append("买卖盘相对均衡")
+    else:
+        reasons.append("卖一压单偏重")
+
+    if intraday_amplitude_pct >= 8:
+        reasons.append("日内振幅较大，分歧不小")
+        score -= 1
+
+    if score >= 7:
+        verdict = "回封概率高"
+    elif score >= 5:
+        verdict = "有回封预期"
+    elif score >= 3:
+        verdict = "回封偏弱"
+    else:
+        verdict = "回封难"
+
+    return {
+        "limit_up": limit_up,
+        "distance_to_limit": distance_to_limit,
+        "pullback_from_high_pct": pullback_from_high_pct,
+        "intraday_amplitude_pct": intraday_amplitude_pct,
+        "bid_ask_ratio": bid_ask_ratio,
+        "score": score,
+        "verdict": verdict,
+        "reasons": reasons,
+    }
+
+
 def format_line(item: dict[str, Any]) -> str:
     flag = "✅触发" if item["triggered"] else "⏳未触发"
     return (
@@ -154,17 +233,25 @@ def main() -> int:
     parser.add_argument("codes", nargs="+", help="股票代码")
     parser.add_argument("--move-pct", type=float, default=2.0, help="涨跌幅阈值，默认2")
     parser.add_argument("--volume-ratio", type=float, default=1.5, help="量比阈值，默认1.5")
+    parser.add_argument("--reseal", action="store_true", help="输出回封判断")
     parser.add_argument("--json", action="store_true", help="JSON输出")
     args = parser.parse_args()
 
     quotes = fetch_quotes(args.codes)
     items = [evaluate(quotes[code], args.move_pct, args.volume_ratio) for code in args.codes if code in quotes]
 
+    if args.reseal:
+        items = [{**item, "reseal": analyze_reseal(item)} for item in items]
+
     if args.json:
         print(json.dumps(items, ensure_ascii=False, indent=2))
     else:
         for item in items:
             print(format_line(item))
+            if args.reseal and "reseal" in item:
+                reseal = item["reseal"]
+                print(f"  回封判断:{reseal['verdict']} | 距涨停:{reseal['distance_to_limit']:.2f} | 回撤:{reseal['pullback_from_high_pct']:.2f}% | 买卖比:{reseal['bid_ask_ratio']:.2f}")
+                print(f"  依据: {'；'.join(reseal['reasons'])}")
 
     missing = [code for code in args.codes if code not in quotes]
     if missing:
